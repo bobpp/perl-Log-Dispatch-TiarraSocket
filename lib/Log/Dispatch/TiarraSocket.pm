@@ -3,6 +3,16 @@ package Log::Dispatch::TiarraSocket;
 use warnings;
 use strict;
 
+use Text::Xslate;
+use IO::Socket::UNIX;
+
+use Params::Validate qw/validate SCALAR BOOLEAN/; 
+
+use Log::Dispatch::Output;
+use base qw/Log::Dispatch::Output/;
+
+Params::Validate::validation_options(allow_extra => 1);
+
 =head1 NAME
 
 Log::Dispatch::TiarraSocket - The great new Log::Dispatch::TiarraSocket!
@@ -22,10 +32,13 @@ Quick summary of what the module does.
 
 Perhaps a little code snippet.
 
-    use Log::Dispatch::TiarraSocket;
-
-    my $foo = Log::Dispatch::TiarraSocket->new();
-    ...
+    use Log::Dispatch;
+    my $foo = Log::Dispatch->new(
+		outputs => [
+			[ 'TiarraSocket', socket_name => 'hoge', channel => '#fuga@piyo', use_notice => 0 ],
+		],
+	);
+	$foo->alert("Hogeeee!");
 
 =head1 EXPORT
 
@@ -34,18 +47,93 @@ if you don't export anything, such as for a purely object-oriented module.
 
 =head1 SUBROUTINES/METHODS
 
-=head2 function1
+=head2 new
+
+constructor used by Log::Dispatch;
 
 =cut
 
-sub function1 {
+sub new {
+	my $proto = shift;
+	my $class = ref $proto || $proto;
+
+	my %param = validate(@_, +{
+		charset => +{
+			type    => SCALAR,
+			default => 'UTF-8',
+		},
+		socket_name => +{
+			type => SCALAR,
+		},
+		channel => +{
+			type => SCALAR,
+		},
+		sender => +{
+			type    => SCALAR,
+			default => "Log::Dispatch::TiarraSocket $VERSION",
+		},
+		use_notice => +{
+			type    => BOOLEAN,
+			default => 1,
+		},
+		send_interval => +{
+			type    => SCALAR,
+			default => 1.0,
+		},
+	});
+
+	my $self = bless {}, $class;
+	$self->_basic_init(%param);
+
+	# option param setting
+	for (qw/charset socket_name channel sender use_notice send_interval/) {
+		$self->{"tiarra_${_}"} = $param{$_};
+	}
+
+	my %virtual_template_path = (
+		'message.tx' => <<"MESSAGE",
+NOTIFY System::SendMessage <:= \$protocol :>\r
+Sender: <:= \$sender :>\r
+Notice: <:= \$notice :>\r
+Channel: <:= \$channel :>\r
+Charset: <:= \$charset :>\r
+Text: [<:= \$level :>] <:= \$text :>\r
+\r
+MESSAGE
+	);
+	$self->{xslate} = Text::Xslate->new(path => \%virtual_template_path);
+
+	return $self;
 }
 
-=head2 function2
+=head2 log_message
+
+log_message used by Log::Dispatch
 
 =cut
 
-sub function2 {
+sub log_message {
+	my($self, %param) = @_;
+
+	my $socket = IO::Socket::UNIX->new(
+		Type => SOCK_STREAM,
+		Peer => '/tmp/tiarra-control/' . $self->{tiarra_socket_name},
+	) or die "Cannot open UNIX socket open";
+
+	my $stash = +{
+		protocol => "TIARRACONTROL/1.0",
+		sender   => $self->{tiarra_sender},
+		notice   => $self->{tiarra_use_notice},
+		channel  => $self->{tiarra_channel},
+		charset  => $self->{tiarra_charset},
+		text     => $param{message},
+		level    => $param{level},
+	};
+
+	my $message = $self->{xslate}->render('message.tx', $stash);
+	$socket->print($message);
+	
+	$socket->close();
 }
 
 =head1 AUTHOR
@@ -57,8 +145,6 @@ bobpp, C<< <bobpp at bobpp.jp> >>
 Please report any bugs or feature requests to C<bug-log-dispatch-tiarrasocket at rt.cpan.org>, or through
 the web interface at L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=Log-Dispatch-TiarraSocket>.  I will be notified, and then you'll
 automatically be notified of progress on your bug as I make changes.
-
-
 
 
 =head1 SUPPORT
